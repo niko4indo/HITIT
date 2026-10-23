@@ -34,9 +34,10 @@ create policy hitit_vault_delete_own on public.hitit_vault
 create or replace function public.hitit_vault_touch_updated_at()
 returns trigger
 language plpgsql
+set search_path = pg_catalog
 as $$
 begin
-  new.updated_at = now();
+  new.updated_at = pg_catalog.now();
   return new;
 end;
 $$;

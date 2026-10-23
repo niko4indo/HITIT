@@ -6,8 +6,13 @@
   const SESSION_KEY = 'hitit-cloud-session';
   const ITERATIONS = 250000;
   const $ = id => document.getElementById(id);
+  // Supabase publishable keys are intended for browser clients. RLS keeps vault rows user-scoped.
+  const DEFAULT_CLOUD_CONFIG = {
+    url: 'https://ofkvradbvykqlikjjuad.supabase.co',
+    key: 'sb_publishable_f3wIl9_RcrRnn-IhkcM2Fw_L7XgfKE_'
+  };
   let app;
-  let config = { url: '', key: '' };
+  let config = { ...DEFAULT_CLOUD_CONFIG };
 
   function toBase64(bytes) {
     let binary = '';
@@ -225,11 +230,12 @@
   window.HITITAppReady.then(async readyApp => {
     app = readyApp;
     const saved = await window.HITITStorage.getMeta('cloudConfig').catch(() => null);
-    if (saved) {
-      config = saved;
-      $('cloudUrl').value = saved.url || '';
-      $('cloudAnonKey').value = saved.key || '';
-    }
+    config = {
+      url: saved?.url || DEFAULT_CLOUD_CONFIG.url,
+      key: saved?.key || DEFAULT_CLOUD_CONFIG.key
+    };
+    $('cloudUrl').value = config.url;
+    $('cloudAnonKey').value = config.key;
     if (getSession()?.access_token) show('云端账户已登录；加密口令仅保留在当前页面内。');
 
     $('cloudUrl').addEventListener('change', () => saveConfig().catch(() => {}));
