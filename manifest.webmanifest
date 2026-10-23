@@ -1,0 +1,16 @@
+{
+  "id": "./",
+  "name": "HITIT 轻量记账",
+  "short_name": "HITIT",
+  "description": "记录收支、管理预算和存款",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f4f5f8",
+  "theme_color": "#f4f5f8",
+  "icons": [
+    { "src": "./icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable" },
+    { "src": "./icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}
