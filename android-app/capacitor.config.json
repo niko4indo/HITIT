@@ -1,0 +1,9 @@
+{
+  "appId": "com.hitit.ledger",
+  "appName": "HITIT",
+  "webDir": "web",
+  "android": {
+    "backgroundColor": "#f4f5f8"
+  }
+}
+
