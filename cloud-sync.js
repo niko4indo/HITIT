@@ -139,8 +139,8 @@
     await saveConfig();
     const email = $('cloudEmail').value.trim();
     if (!email) throw new Error('请先填写注册邮箱');
-    const endpoint = '/auth/v1/resend?type=signup&redirect_to=' + encodeURIComponent(authRedirectUrl());
-    await request(endpoint, { method: 'POST', body: JSON.stringify({ email }) });
+    const endpoint = '/auth/v1/resend?redirect_to=' + encodeURIComponent(authRedirectUrl());
+    await request(endpoint, { method: 'POST', body: JSON.stringify({ email, type: 'signup' }) });
     show('验证邮件已重新发送。请只打开最新的一封，并在有效期内完成验证。');
   }
 
