@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hitit-static-v3';
+const CACHE_NAME = 'hitit-static-v4';
 const baseUrl = new URL('./', self.registration.scope);
 const coreFiles = ['index.html', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'].map(file => new URL(file, baseUrl).toString());
 self.addEventListener('install', event => {
@@ -15,3 +15,4 @@ self.addEventListener('fetch', event => {
     return response;
   }).catch(() => caches.match(new URL('index.html', baseUrl).toString()))));
 });
+
