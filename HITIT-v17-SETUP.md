@@ -9,7 +9,7 @@
 Supabase 项目已在新加坡区域创建，`hitit_vault` 加密表及用户隔离策略已部署。网页应用已预填 Project URL 和 Publishable key，无需手动运行 SQL 或复制密钥。
 
 1. 在 Supabase Dashboard 的 Authentication 中启用 Email 登录；若启用邮箱验证，注册后先完成邮件验证。
-2. 打开 Authentication → URL Configuration，把 Site URL 设置为 HITIT 的 GitHub Pages HTTPS 地址，并把同一地址加入 Redirect URLs。
+2. 打开 Authentication → URL Configuration，把 Site URL 和 Redirect URLs 设置为 HITIT 的 HTTPS 地址。若使用 GitHub Pages 默认地址，填写 `https://niko4indo.github.io/HITIT/`；若设置了自定义域名，则填写自定义域名地址。
 3. 打开 HITIT 设置，创建云端账户并登录；设置至少 10 位的加密口令，再点“安全同步”。此口令不会发送到 Supabase，请自行妥善保存。
 4. 在新浏览器或手机上登录同一账户并使用相同加密口令。首次发现云端账本时，选择采用云端或本机副本。
 
