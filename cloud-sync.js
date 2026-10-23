@@ -107,20 +107,41 @@
     return session;
   }
 
+  function authRedirectUrl() {
+    const target = new URL(window.location.href);
+    target.search = '';
+    target.hash = '';
+    return target.href;
+  }
+
   async function accountAction(path) {
     await saveConfig();
     const email = $('cloudEmail').value.trim();
     const password = $('cloudPassword').value;
     if (!email || !password) throw new Error('请填写邮箱和账户密码');
-    const result = await request(path, { method: 'POST', body: JSON.stringify({ email, password }) });
+    const endpoint = path === '/auth/v1/signup'
+      ? path + '?redirect_to=' + encodeURIComponent(authRedirectUrl())
+      : path;
+    const result = await request(endpoint, { method: 'POST', body: JSON.stringify({ email, password }) });
     if (!result.access_token) {
-      show('账户请求已提交；如启用了邮箱验证，请先完成邮件验证，再登录。');
+      show(path === '/auth/v1/signup'
+        ? '验证邮件已发送。请使用最新邮件并在有效期内打开；链接过期后可点“重发验证邮件”。'
+        : '账户请求已提交；如启用了邮箱验证，请先完成邮件验证，再登录。');
       return false;
     }
     putSession({ access_token: result.access_token, refresh_token: result.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600), user_id: result.user?.id });
     $('cloudPassword').value = '';
     show('云端账户已登录；输入加密口令后可同步。');
     return true;
+  }
+
+  async function resendSignupEmail() {
+    await saveConfig();
+    const email = $('cloudEmail').value.trim();
+    if (!email) throw new Error('请先填写注册邮箱');
+    const endpoint = '/auth/v1/resend?type=signup&redirect_to=' + encodeURIComponent(authRedirectUrl());
+    await request(endpoint, { method: 'POST', body: JSON.stringify({ email }) });
+    show('验证邮件已重新发送。请只打开最新的一封，并在有效期内完成验证。');
   }
 
   async function fetchRemote(session) {
@@ -242,6 +263,11 @@
     $('cloudAnonKey').addEventListener('change', () => saveConfig().catch(() => {}));
     $('cloudSignup').addEventListener('click', async () => {
       try { await accountAction('/auth/v1/signup'); } catch (error) { show(error.message, true); }
+    });
+    $('cloudResend').addEventListener('click', async () => {
+      $('cloudResend').disabled = true;
+      try { await resendSignupEmail(); } catch (error) { show(error.message, true); }
+      finally { $('cloudResend').disabled = false; }
     });
     $('cloudLogin').addEventListener('click', async () => {
       try { await accountAction('/auth/v1/token?grant_type=password'); } catch (error) { show(error.message, true); }
