@@ -126,7 +126,7 @@
     await saveConfig();
     const email = $('cloudEmail').value.trim();
     const password = $('cloudPassword').value;
-    if (!email || !password) throw new Error('请填写邮箱和账户密码');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || !password) throw new Error('请填写有效邮箱和账户密码');
     const endpoint = path === '/auth/v1/signup'
       ? path + '?redirect_to=' + encodeURIComponent(authRedirectUrl())
       : path;
@@ -144,7 +144,7 @@
   async function resendSignupEmail() {
     await saveConfig();
     const email = $('cloudEmail').value.trim();
-    if (!email) throw new Error('请先填写注册邮箱');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('请先填写有效的注册邮箱');
     const endpoint = '/auth/v1/resend?redirect_to=' + encodeURIComponent(authRedirectUrl());
     await request(endpoint, { method: 'POST', body: JSON.stringify({ email, type: 'signup' }) });
     show('Supabase 已接受重发请求。请检查收件箱和垃圾邮件，并只使用最新邮件中的链接。');
@@ -263,6 +263,11 @@
     };
     $('cloudUrl').value = config.url;
     $('cloudAnonKey').value = config.key;
+    const authEmail = $('cloudEmail');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(authEmail.value.trim())) {
+      authEmail.value = '';
+      $('cloudPassword').value = '';
+    }
     if (getSession()?.access_token) show('云端账户已登录；加密口令仅保留在当前页面内。');
 
     $('cloudUrl').addEventListener('change', () => saveConfig().catch(() => {}));
