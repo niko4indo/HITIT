@@ -62,8 +62,16 @@
   function show(message, error = false) {
     const element = $('cloudStatus');
     if (!element) return;
+    const signedIn = Boolean(getSession()?.access_token);
     element.textContent = message;
-    element.style.color = error ? '#c95049' : '';
+    element.dataset.state = error ? 'error' : signedIn ? 'success' : 'neutral';
+    const badge = $('cloudAccountState');
+    if (badge) {
+      badge.textContent = signedIn ? '已登录' : error ? '需处理' : '未登录';
+      badge.dataset.state = signedIn ? 'active' : error ? 'error' : 'idle';
+    }
+    const sessionActions = $('cloudSync')?.parentElement;
+    if (sessionActions) sessionActions.hidden = !signedIn;
   }
 
   async function saveConfig() {
@@ -97,6 +105,13 @@
     sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
   }
 
+  function authRedirectUrl() {
+    const target = new URL(window.location.href);
+    target.search = '';
+    target.hash = '';
+    return target.href;
+  }
+
   async function authenticatedSession() {
     let session = getSession();
     if (!session?.access_token || !session?.refresh_token) throw new Error('请先登录云端账户');
@@ -105,13 +120,6 @@
     session = { access_token: refreshed.access_token, refresh_token: refreshed.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(refreshed.expires_in || 3600), user_id: refreshed.user?.id || session.user_id };
     putSession(session);
     return session;
-  }
-
-  function authRedirectUrl() {
-    const target = new URL(window.location.href);
-    target.search = '';
-    target.hash = '';
-    return target.href;
   }
 
   async function accountAction(path) {
@@ -124,9 +132,7 @@
       : path;
     const result = await request(endpoint, { method: 'POST', body: JSON.stringify({ email, password }) });
     if (!result.access_token) {
-      show(path === '/auth/v1/signup'
-        ? '验证邮件已发送。请使用最新邮件并在有效期内打开；链接过期后可点“重发验证邮件”。'
-        : '账户请求已提交；如启用了邮箱验证，请先完成邮件验证，再登录。');
+      show('账户请求已提交。请查看收件箱；如该邮箱已有待验证账户，点“重发验证邮件”即可，无需重复创建。');
       return false;
     }
     putSession({ access_token: result.access_token, refresh_token: result.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600), user_id: result.user?.id });
@@ -141,7 +147,7 @@
     if (!email) throw new Error('请先填写注册邮箱');
     const endpoint = '/auth/v1/resend?redirect_to=' + encodeURIComponent(authRedirectUrl());
     await request(endpoint, { method: 'POST', body: JSON.stringify({ email, type: 'signup' }) });
-    show('验证邮件已重新发送。请只打开最新的一封，并在有效期内完成验证。');
+    show('Supabase 已接受重发请求。请检查收件箱和垃圾邮件，并只使用最新邮件中的链接。');
   }
 
   async function fetchRemote(session) {
@@ -290,4 +296,3 @@
     });
   }).catch(() => {});
 })();
-
