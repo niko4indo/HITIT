@@ -14,6 +14,12 @@
   };
   let app;
   let config = { ...DEFAULT_CLOUD_CONFIG };
+  let autoSyncPassword = '';
+  let autoSyncTimer = 0;
+  let autoSyncPending = false;
+  let autoSyncPaused = false;
+  let autoSyncNeedsManual = false;
+  let syncInProgress = false;
 
   function toBase64(bytes) {
     let binary = '';
@@ -215,7 +221,7 @@
     });
     $('cloudPassword').value = '';
     sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
-    show('Google 登录成功。输入加密口令后即可同步账本。');
+    show('Google 登录成功。输入加密口令并点“安全同步”，即可开启本次打开期间的自动同步。');
     return true;
   }
 
@@ -311,10 +317,10 @@
     });
   }
 
-  async function syncNow() {
+  async function syncNow(passwordOverride = null, { automatic = false } = {}) {
     if (!navigator.onLine) throw new Error('当前处于离线状态');
     if (!crypto?.subtle) throw new Error('当前页面不支持加密，请通过 HTTPS 地址打开');
-    const password = $('vaultPassword').value;
+    const password = passwordOverride ?? $('vaultPassword').value;
     if (password.length < 10) throw new Error('加密口令至少需要 10 位，且不会保存在设备上');
     const session = await authenticatedSession();
     const local = app.getState();
@@ -325,30 +331,39 @@
 
     if (!remote) {
       if (base?.revision) {
-        if (!confirm('检测到此前同步过的云端副本已不存在。是否用本机数据重新建立云端副本？')) return;
+        if (automatic) {
+          show('云端副本状态与本机记录不一致，请点“安全同步”确认后再继续。', true);
+          return false;
+        }
+        if (!confirm('检测到此前同步过的云端副本已不存在。是否用本机数据重新建立云端副本？')) return false;
       }
       const saved = await putRemote(local, session, null, password);
       await window.HITITStorage.setMeta(baseKey, { revision: Number(saved.revision), hash: localHash });
       show('首次同步完成：本机账本已加密上传。');
-      $('vaultPassword').value = '';
-      return;
+      return true;
     }
 
     const remoteState = await decryptState(remote, password);
     const remoteHash = await stateHash(remoteState);
     if (!base) {
+      if (automatic) {
+        show('检测到已有云端账本，请点“安全同步”并选择采用云端或本机后再开启自动同步。', true);
+        return false;
+      }
       const choice = await chooseConflict('发现云端账本', '这是该设备首次同步。请选择保留云端账本，或用本机账本覆盖云端。');
       if (choice === 'cloud') {
         await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: remoteHash });
         show('已采用云端账本。');
         await app.replaceState(remoteState);
-      } else if (choice === 'local') {
+        return true;
+      }
+      if (choice === 'local') {
         const saved = await putRemote(local, session, remote, password);
         await window.HITITStorage.setMeta(baseKey, { revision: Number(saved.revision), hash: localHash });
         show('本机账本已加密上传并覆盖旧云端副本。');
-        $('vaultPassword').value = '';
+        return true;
       }
-      return;
+      return false;
     }
 
     const localChanged = localHash !== base.hash;
@@ -357,6 +372,10 @@
       await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: localHash });
       show('本机与云端数据一致，无需更新。');
     } else if (localChanged && remoteChanged) {
+      if (automatic) {
+        show('本机和云端都有新改动。为避免覆盖，自动同步已暂停；请点“安全同步”选择保留版本。', true);
+        return false;
+      }
       const choice = await chooseConflict('两台设备都有新改动', '为避免丢失记录，请选择保留哪一份。本次不会自动合并两边的记录。');
       if (choice === 'cloud') {
         await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: remoteHash });
@@ -366,7 +385,8 @@
         const saved = await putRemote(local, session, remote, password);
         await window.HITITStorage.setMeta(baseKey, { revision: Number(saved.revision), hash: localHash });
         show('已采用本机账本并更新云端。');
-        $('vaultPassword').value = '';
+      } else {
+        return false;
       }
     } else if (remoteChanged) {
       await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: remoteHash });
@@ -376,10 +396,52 @@
       const saved = await putRemote(local, session, remote, password);
       await window.HITITStorage.setMeta(baseKey, { revision: Number(saved.revision), hash: localHash });
       show('本机账本已加密同步到云端。');
-      $('vaultPassword').value = '';
     } else {
       await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: remoteHash });
       show('同步状态已更新。');
+    }
+    return true;
+  }
+
+  function scheduleAutoSync(delay = 1000) {
+    autoSyncPending = true;
+    if (!autoSyncPassword || !getSession()?.access_token || autoSyncPaused || autoSyncNeedsManual) return;
+    if (!navigator.onLine) {
+      show('当前离线：记录已保存在本机，联网后会自动同步。');
+      return;
+    }
+    clearTimeout(autoSyncTimer);
+    autoSyncTimer = window.setTimeout(runAutoSync, delay);
+  }
+
+  async function runAutoSync() {
+    if (!autoSyncPending || !autoSyncPassword || !getSession()?.access_token || autoSyncPaused || autoSyncNeedsManual) return;
+    if (!navigator.onLine) {
+      show('当前离线：记录已保存在本机，联网后会自动同步。');
+      return;
+    }
+    if (syncInProgress) {
+      clearTimeout(autoSyncTimer);
+      autoSyncTimer = window.setTimeout(runAutoSync, 500);
+      return;
+    }
+
+    autoSyncPending = false;
+    syncInProgress = true;
+    show('正在自动加密同步…');
+    try {
+      const completed = await syncNow(autoSyncPassword, { automatic: true });
+      if (!completed) {
+        autoSyncPending = true;
+        autoSyncNeedsManual = true;
+      }
+    } catch (error) {
+      autoSyncPending = true;
+      autoSyncPaused = true;
+      show('自动同步失败；本机记录仍已保存。' + (error.message || '请检查网络') + '。可点“安全同步”重试。', true);
+    } finally {
+      syncInProgress = false;
+      if (autoSyncPending && !autoSyncPaused && !autoSyncNeedsManual && navigator.onLine) scheduleAutoSync(400);
     }
   }
 
@@ -423,6 +485,16 @@
 
   window.HITITAppReady.then(async readyApp => {
     app = readyApp;
+    window.addEventListener('hitit-state-saved', () => scheduleAutoSync());
+    window.addEventListener('online', () => {
+      if (autoSyncPending && autoSyncPassword && !autoSyncNeedsManual) {
+        autoSyncPaused = false;
+        scheduleAutoSync(300);
+      }
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && autoSyncPending && !autoSyncPaused && !autoSyncNeedsManual) scheduleAutoSync(300);
+    });
     const saved = await window.HITITStorage.getMeta('cloudConfig').catch(() => null);
     config = {
       url: saved?.url || DEFAULT_CLOUD_CONFIG.url,
@@ -435,7 +507,7 @@
       authEmail.value = '';
       $('cloudPassword').value = '';
     }
-    if (getSession()?.access_token) show('云端账户已登录；加密口令仅保留在当前页面内。');
+    if (getSession()?.access_token) show('云端账户已登录。输入加密口令并点“安全同步”，即可开启本次打开期间的自动同步。');
     try { await completeGoogleRedirect(); } catch (error) { show(error.message || 'Google 登录失败，请重试', true); }
 
     $('cloudUrl').addEventListener('change', () => saveConfig().catch(() => {}));
@@ -457,10 +529,33 @@
       try { await accountAction('/auth/v1/token?grant_type=password'); } catch (error) { show(error.message, true); }
     });
     $('cloudSync').addEventListener('click', async () => {
-      $('cloudSync').disabled = true;
+      const button = $('cloudSync');
+      if (syncInProgress) return show('已有同步正在进行，请稍候。');
+      const password = $('vaultPassword').value;
+      button.disabled = true;
+      clearTimeout(autoSyncTimer);
+      autoSyncPending = false;
+      syncInProgress = true;
       show('正在加密并检查同步状态…');
-      try { await syncNow(); } catch (error) { show(error.message || '同步失败；本机数据未更改', true); }
-      finally { $('vaultPassword').value = ''; $('cloudSync').disabled = false; }
+      let completed = false;
+      try {
+        completed = await syncNow(password);
+        if (completed) {
+          autoSyncPassword = password;
+          autoSyncPaused = false;
+          autoSyncNeedsManual = false;
+          show('同步完成；本次打开期间已开启自动同步。关闭页面后需重新输入加密口令。');
+        } else if (autoSyncPassword) {
+          autoSyncNeedsManual = true;
+        }
+      } catch (error) {
+        show(error.message || '同步失败；本机数据未更改', true);
+      } finally {
+        $('vaultPassword').value = '';
+        syncInProgress = false;
+        button.disabled = false;
+        if (completed && autoSyncPending && !autoSyncNeedsManual) scheduleAutoSync(400);
+      }
     });
     $('cloudHistory').addEventListener('click', async () => {
       const button = $('cloudHistory');
@@ -473,6 +568,11 @@
       finally { button.disabled = false; }
     });
     $('cloudLogout').addEventListener('click', async () => {
+      clearTimeout(autoSyncTimer);
+      autoSyncPassword = '';
+      autoSyncPending = false;
+      autoSyncPaused = false;
+      autoSyncNeedsManual = false;
       const session = getSession();
       if (session?.access_token) {
         try { await request('/auth/v1/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + session.access_token } }); } catch {}
