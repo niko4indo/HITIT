@@ -22,3 +22,5 @@ This folder packages the existing offline-first web app in a local Android WebVi
 
 The bundled app uses Android's app-private WebView storage. Optional local encryption protects the IndexedDB ledger with AES-256-GCM and asks for the password each time the app opens. Cloud sync and exported backup files are also encrypted in the web layer; encryption passwords are not saved. Keep the Android lock screen enabled and protect exported backup files.
 
+Google OAuth is enabled for the Chrome website and installed PWA. This Capacitor wrapper intentionally blocks that button until a system-browser callback and Android deep link are configured; use the Chrome PWA for Google sign-in and cloud sync in the meantime.
+
