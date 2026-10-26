@@ -174,9 +174,11 @@
       code_challenge: challenge,
       code_challenge_method: 's256'
     });
-    const result = await request('/auth/v1/authorize?' + query.toString());
-    if (!result?.url) throw new Error('Supabase 未返回 Google 登录地址，请检查 Google 登录配置');
-    window.location.assign(result.url);
+    // OAuth authorize responds with an HTTP redirect. Navigate the browser directly
+    // instead of fetch(), which follows the cross-origin redirect and fails CORS.
+    const authorizeUrl = new URL('/auth/v1/authorize', config.url);
+    authorizeUrl.search = query.toString();
+    window.location.assign(authorizeUrl.href);
   }
 
   async function completeGoogleRedirect() {
