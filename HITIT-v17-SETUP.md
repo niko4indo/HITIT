@@ -6,15 +6,15 @@
 
 ## 打开云端加密同步
 
-Supabase 项目已在新加坡区域创建，`hitit_vault` 加密表及用户隔离策略已部署。网页应用已预填 Project URL 和 Publishable key，无需手动运行 SQL 或复制密钥。
+Supabase 项目已在新加坡区域创建，`hitit_vault` 与 `hitit_vault_history` 加密表及用户隔离策略已部署。网页应用已预填 Project URL 和 Publishable key，无需手动运行 SQL 或复制密钥。
 
-1. 在 Supabase Dashboard 的 Authentication 中启用 Email 登录；若启用邮箱验证，注册后先完成邮件验证。
-2. 打开 Authentication → URL Configuration，将 Site URL 设为 `https://niko4indo.github.io/HITIT/`，并在 Redirect URLs 中添加同一完整地址（若使用自定义域名，则改用自定义域名）。
-3. 打开 HITIT 设置创建云端账户。邮件验证会返回当前 HITIT 页面；若验证链接已过期，在同一邮箱输入框旁点“重发验证邮件”，只打开最新的一封并尽快完成验证。
-4. 验证后登录；设置至少 10 位的加密口令，再点“安全同步”。此口令不会发送到 Supabase，请自行妥善保存。
-4. 在新浏览器或手机上登录同一账户并使用相同加密口令。首次发现云端账本时，选择采用云端或本机副本。
+1. 在 Google Auth Platform 创建 **Web application** OAuth 客户端。Authorized JavaScript origin 填 `https://niko4indo.github.io`；Authorized redirect URI 填 `https://ofkvradbvykqlikjjuad.supabase.co/auth/v1/callback`。若应用仍在测试模式，把你自己的 Google 账户添加为 test user。
+2. 在 Supabase Dashboard 的 **Authentication → Sign-in providers → Google** 启用 Google 登录，并填入 OAuth Client ID 和 Client Secret。Client Secret 只保存在 Supabase，不能写入网页应用或提交到 GitHub。
+3. 在 Supabase **Authentication → URL Configuration** 中，把 Site URL 和 Redirect URLs 都设置为 `https://niko4indo.github.io/HITIT/`；使用自定义域名时改为该域名。
+4. 打开 HITIT 设置，点“使用 Google 继续”登录，再设置至少 10 位的加密口令并点“安全同步”。此口令不会发送到 Supabase，请妥善保管。
+5. 在新浏览器或手机上登录同一个 Google 账户并使用相同的加密口令。首次发现云端账本时，选择采用云端或本机副本。覆盖云端账本前，旧版本会自动加密存入“历史备份”，可从最近 50 个版本中恢复。
 
-应用仅使用可公开的 Publishable key，**绝不要把 `service_role` 或 Secret key 放进应用**。RLS 限制账户只能读写自己的加密快照。
+应用仅使用可公开的 Publishable key，**绝不要把 `service_role`、Supabase Secret key 或 Google Client Secret 放进应用**。RLS 限制账户只能读写自己的加密快照和历史版本。
 
 每台设备使用独立本地数据库。两边都发生变更时会要求选择保留哪一份，不会自动合并。加密口令遗失后，云端密文无法还原；请同时保留加密 JSON 备份。
 
