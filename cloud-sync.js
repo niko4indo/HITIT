@@ -4,6 +4,7 @@
   const encoder = new TextEncoder();
   const decoder = new TextDecoder();
   const SESSION_KEY = 'hitit-cloud-session';
+  const OAUTH_VERIFIER_KEY = 'hitit-google-pkce-verifier';
   const ITERATIONS = 250000;
   const $ = id => document.getElementById(id);
   // Supabase publishable keys are intended for browser clients. RLS keeps vault rows user-scoped.
@@ -72,6 +73,10 @@
     }
     const sessionActions = $('cloudSync')?.parentElement;
     if (sessionActions) sessionActions.hidden = !signedIn;
+    ['cloudSync', 'cloudHistory', 'cloudLogout'].forEach(id => {
+      const button = $(id);
+      if (button) button.hidden = !signedIn;
+    });
   }
 
   async function saveConfig() {
@@ -150,10 +155,129 @@
     show('Supabase 已接受重发请求。请检查收件箱和垃圾邮件，并只使用最新邮件中的链接。');
   }
 
+  function base64Url(bytes) {
+    return toBase64(bytes).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+  }
+
+  async function beginGoogleLogin() {
+    await saveConfig();
+    if (!crypto?.subtle) throw new Error('当前浏览器不支持安全登录，请更新浏览器后重试');
+    const random = crypto.getRandomValues(new Uint8Array(48));
+    const verifier = base64Url(random);
+    const challenge = base64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(verifier))));
+    sessionStorage.setItem(OAUTH_VERIFIER_KEY, verifier);
+    const query = new URLSearchParams({
+      provider: 'google',
+      redirect_to: authRedirectUrl(),
+      scopes: 'openid email profile',
+      code_challenge: challenge,
+      code_challenge_method: 's256'
+    });
+    const result = await request('/auth/v1/authorize?' + query.toString());
+    if (!result?.url) throw new Error('Supabase 未返回 Google 登录地址，请检查 Google 登录配置');
+    window.location.assign(result.url);
+  }
+
+  async function completeGoogleRedirect() {
+    const current = new URL(window.location.href);
+    const query = current.searchParams;
+    const hash = new URLSearchParams(current.hash.replace(/^#/, ''));
+    const code = query.get('code');
+    const error = query.get('error_description') || query.get('error') || hash.get('error_description') || hash.get('error');
+    if (!code && !error) return false;
+
+    current.search = '';
+    current.hash = '';
+    window.history.replaceState({}, document.title, current.href);
+    if (error) {
+      sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+      show('Google 登录未完成：' + error, true);
+      return false;
+    }
+
+    const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
+    if (!verifier) throw new Error('登录状态已过期，请重新使用 Google 登录');
+    const tokens = await request('/auth/v1/token?grant_type=pkce', {
+      method: 'POST',
+      body: JSON.stringify({ auth_code: code, code_verifier: verifier })
+    });
+    if (!tokens?.access_token || !tokens?.refresh_token) throw new Error('Google 登录成功返回了不完整的会话，请重试');
+    const user = tokens.user || await request('/auth/v1/user', { headers: { Authorization: 'Bearer ' + tokens.access_token } });
+    if (!user?.id) throw new Error('无法确认登录账户，请重新登录');
+    putSession({
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token,
+      expires_at: Math.floor(Date.now() / 1000) + Number(tokens.expires_in || 3600),
+      user_id: user.id
+    });
+    $('cloudPassword').value = '';
+    sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+    show('Google 登录成功。输入加密口令后即可同步账本。');
+    return true;
+  }
+
   async function fetchRemote(session) {
     const query = new URLSearchParams({ select: 'user_id,revision,salt,iv,ciphertext', user_id: 'eq.' + session.user_id, limit: '1' });
     const rows = await request('/rest/v1/hitit_vault?' + query.toString(), { headers: { Authorization: 'Bearer ' + session.access_token } });
     return Array.isArray(rows) ? rows[0] || null : null;
+  }
+
+  async function fetchRemoteHistory(session) {
+    const query = new URLSearchParams({
+      select: 'revision,archived_at,salt,iv,ciphertext',
+      user_id: 'eq.' + session.user_id,
+      order: 'revision.desc',
+      limit: '50'
+    });
+    const rows = await request('/rest/v1/hitit_vault_history?' + query.toString(), {
+      headers: { Authorization: 'Bearer ' + session.access_token }
+    });
+    return Array.isArray(rows) ? rows : [];
+  }
+
+  async function archiveRemoteSnapshot(existing, session) {
+    const headers = { Authorization: 'Bearer ' + session.access_token };
+    const query = new URLSearchParams({
+      select: 'revision,salt,iv,ciphertext',
+      user_id: 'eq.' + session.user_id,
+      revision: 'eq.' + existing.revision,
+      limit: '1'
+    });
+    const matches = rows => Array.isArray(rows) && rows.length === 1 &&
+      Number(rows[0].revision) === Number(existing.revision) &&
+      rows[0].salt === existing.salt && rows[0].iv === existing.iv && rows[0].ciphertext === existing.ciphertext;
+    const prior = await request('/rest/v1/hitit_vault_history?' + query.toString(), { headers });
+    if (matches(prior)) return;
+    if (Array.isArray(prior) && prior.length) throw new Error('云端历史版本校验失败，为保护数据已取消覆盖');
+    try {
+      await request('/rest/v1/hitit_vault_history', {
+        method: 'POST',
+        headers: { ...headers, Prefer: 'return=minimal' },
+        body: JSON.stringify({
+          user_id: session.user_id,
+          revision: Number(existing.revision),
+          salt: existing.salt,
+          iv: existing.iv,
+          ciphertext: existing.ciphertext
+        })
+      });
+    } catch (error) {
+      const retry = await request('/rest/v1/hitit_vault_history?' + query.toString(), { headers });
+      if (!matches(retry)) throw error;
+    }
+  }
+
+  async function pruneRemoteHistory(session, currentRevision) {
+    const keepFrom = Math.max(1, Number(currentRevision) - 50);
+    if (keepFrom <= 1) return;
+    const query = new URLSearchParams({
+      user_id: 'eq.' + session.user_id,
+      revision: 'lt.' + keepFrom
+    });
+    await request('/rest/v1/hitit_vault_history?' + query.toString(), {
+      method: 'DELETE',
+      headers: { Authorization: 'Bearer ' + session.access_token }
+    });
   }
 
   async function putRemote(state, session, existing, password) {
@@ -162,9 +286,11 @@
     const row = { user_id: session.user_id, revision: Number(existing?.revision || 0) + 1, salt: toBase64(salt), iv: encrypted.iv, ciphertext: encrypted.ciphertext };
     let result;
     if (existing) {
+      await archiveRemoteSnapshot(existing, session);
       const query = new URLSearchParams({ user_id: 'eq.' + session.user_id, revision: 'eq.' + existing.revision });
       result = await request('/rest/v1/hitit_vault?' + query.toString(), { method: 'PATCH', headers: { Authorization: 'Bearer ' + session.access_token, Prefer: 'return=representation' }, body: JSON.stringify(row) });
       if (!Array.isArray(result) || result.length !== 1) throw new Error('云端数据刚刚被另一台设备更新，请重新同步');
+      try { await pruneRemoteHistory(session, row.revision); } catch {}
     } else {
       result = await request('/rest/v1/hitit_vault', { method: 'POST', headers: { Authorization: 'Bearer ' + session.access_token, Prefer: 'return=representation' }, body: JSON.stringify(row) });
       if (!Array.isArray(result) || result.length !== 1) throw new Error('云端没有确认保存，请刷新后重试');
@@ -254,6 +380,44 @@
     }
   }
 
+  function showRemoteHistory(versions, session) {
+    const items = versions.map(version => {
+      const revision = Number(version.revision);
+      const when = new Date(version.archived_at);
+      const label = Number.isFinite(when.getTime()) ? when.toLocaleString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '时间未知';
+      return '<button type="button" class="cloud-history-row" data-revision="' + revision + '"><span><b>版本 ' + revision + '</b><small>' + label + '</small></span><span aria-hidden="true">恢复</span></button>';
+    }).join('');
+    app.dialog('<h3>云端历史备份</h3><p>每次覆盖云端账本前，旧版本会先加密归档。最多保留最近 50 个历史版本。</p><div class="cloud-history-list">' + (items || '<div class="cloud-history-empty">还没有历史版本。下一次同步产生更新后，旧版本会自动归档。</div>') + '</div><div class="actions"><button data-cancel>关闭</button><button data-ok hidden>关闭</button></div>', () => {});
+    document.querySelectorAll('.cloud-history-row').forEach(button => {
+      button.addEventListener('click', async () => {
+        const selected = versions.find(item => Number(item.revision) === Number(button.dataset.revision));
+        if (selected) promptRestoreVersion(selected, session);
+      });
+    });
+  }
+
+  function promptRestoreVersion(version, session) {
+    app.dialog('<h3>恢复历史版本 ' + Number(version.revision) + '</h3><p>将用此版本替换当前云端账本和本机账本。当前云端版本会先归档；两份数据不会自动合并。</p><input id="historyVaultPassword" type="password" autocomplete="new-password" placeholder="输入加密口令"><div class="actions"><button data-cancel>取消</button><button class="primary" data-ok>恢复</button></div>', async () => {
+      const password = $('historyVaultPassword').value;
+      if (password.length < 10) return app.toast('请输入正确的加密口令');
+      const action = $('box').querySelector('[data-ok]');
+      action.disabled = true;
+      try {
+        const restoredState = await decryptState(version, password);
+        const current = await fetchRemote(session);
+        if (!current) throw new Error('云端当前账本不存在，无法安全恢复');
+        const restoredHash = await stateHash(restoredState);
+        const saved = await putRemote(restoredState, session, current, password);
+        await window.HITITStorage.setMeta('cloudBase:' + session.user_id, { revision: Number(saved.revision), hash: restoredHash });
+        $('dialog').classList.remove('open');
+        await app.replaceState(restoredState);
+      } catch (error) {
+        action.disabled = false;
+        app.toast(error.message || '恢复失败；当前账本未更改');
+      }
+    });
+  }
+
   window.HITITAppReady.then(async readyApp => {
     app = readyApp;
     const saved = await window.HITITStorage.getMeta('cloudConfig').catch(() => null);
@@ -269,9 +433,15 @@
       $('cloudPassword').value = '';
     }
     if (getSession()?.access_token) show('云端账户已登录；加密口令仅保留在当前页面内。');
+    try { await completeGoogleRedirect(); } catch (error) { show(error.message || 'Google 登录失败，请重试', true); }
 
     $('cloudUrl').addEventListener('change', () => saveConfig().catch(() => {}));
     $('cloudAnonKey').addEventListener('change', () => saveConfig().catch(() => {}));
+    $('cloudGoogleLogin').addEventListener('click', async () => {
+      const button = $('cloudGoogleLogin');
+      button.disabled = true;
+      try { await beginGoogleLogin(); } catch (error) { show(error.message || 'Google 登录暂时不可用', true); button.disabled = false; }
+    });
     $('cloudSignup').addEventListener('click', async () => {
       try { await accountAction('/auth/v1/signup'); } catch (error) { show(error.message, true); }
     });
@@ -289,6 +459,16 @@
       try { await syncNow(); } catch (error) { show(error.message || '同步失败；本机数据未更改', true); }
       finally { $('vaultPassword').value = ''; $('cloudSync').disabled = false; }
     });
+    $('cloudHistory').addEventListener('click', async () => {
+      const button = $('cloudHistory');
+      button.disabled = true;
+      try {
+        const session = await authenticatedSession();
+        const versions = await fetchRemoteHistory(session);
+        showRemoteHistory(versions, session);
+      } catch (error) { show(error.message || '读取历史备份失败', true); }
+      finally { button.disabled = false; }
+    });
     $('cloudLogout').addEventListener('click', async () => {
       const session = getSession();
       if (session?.access_token) {
@@ -301,3 +481,4 @@
     });
   }).catch(() => {});
 })();
+
