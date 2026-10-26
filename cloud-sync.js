@@ -161,6 +161,7 @@
 
   async function beginGoogleLogin() {
     await saveConfig();
+    if (window.Capacitor?.isNativePlatform?.()) throw new Error('Google 登录目前支持 Chrome 中的 HITIT 网页版和已安装 PWA；本地 APK 尚未配置安全的系统浏览器回跳。');
     if (!crypto?.subtle) throw new Error('当前浏览器不支持安全登录，请更新浏览器后重试');
     const random = crypto.getRandomValues(new Uint8Array(48));
     const verifier = base64Url(random);
