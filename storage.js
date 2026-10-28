@@ -199,6 +199,30 @@
     return put('meta:' + key, value);
   }
 
+  async function clearLocalData() {
+    await writeQueue.catch(() => {});
+    writeQueue = openDb().then(db => new Promise((resolve, reject) => {
+      const tx = db.transaction(STORE_NAME, 'readwrite');
+      const store = tx.objectStore(STORE_NAME);
+      const cursorRequest = store.openCursor();
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+        // Keep the project connection so the user can sign back in and restore the cloud copy.
+        if (cursor.key !== 'meta:cloudConfig') cursor.delete();
+        cursor.continue();
+      };
+      cursorRequest.onerror = () => reject(cursorRequest.error || new Error('清理本机账本失败'));
+      tx.oncomplete = () => resolve();
+      tx.onerror = tx.onabort = () => reject(tx.error || new Error('清理本机账本失败'));
+    }));
+    await writeQueue;
+    try { localStorage.removeItem('ledger-final'); } catch {}
+    localKey = null;
+    localSalt = null;
+    localEncryption = false;
+  }
+
   async function enableLocalEncryption(state, password) {
     if (!crypto?.subtle) throw new Error('当前页面不支持本机加密，请用 HTTPS 或已安装应用打开');
     if (password.length < 10) throw new Error('本机加密口令至少需要 10 位');
@@ -259,6 +283,6 @@
     return writeQueue;
   }
 
-  window.HITITStorage = { loadState, saveState, getMeta, setMeta, persistenceStatus, requestPersistentStorage, enableLocalEncryption, disableLocalEncryption, isLocallyEncrypted: () => localEncryption };
+  window.HITITStorage = { loadState, saveState, getMeta, setMeta, clearLocalData, persistenceStatus, requestPersistentStorage, enableLocalEncryption, disableLocalEncryption, isLocallyEncrypted: () => localEncryption };
 })();
 
