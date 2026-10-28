@@ -20,6 +20,7 @@
   let autoSyncPaused = false;
   let autoSyncNeedsManual = false;
   let syncInProgress = false;
+  const handledNativeCallbacks = new Set();
 
   function toBase64(bytes) {
     let binary = '';
@@ -108,15 +109,24 @@
     return body;
   }
 
+  function isNativeApp() {
+    return window.Capacitor?.isNativePlatform?.() === true;
+  }
+
+  function authStorage() {
+    return isNativeApp() ? localStorage : sessionStorage;
+  }
+
   function getSession() {
-    try { return JSON.parse(sessionStorage.getItem(SESSION_KEY) || 'null'); } catch { return null; }
+    try { return JSON.parse(authStorage().getItem(SESSION_KEY) || 'null'); } catch { return null; }
   }
 
   function putSession(session) {
-    sessionStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    authStorage().setItem(SESSION_KEY, JSON.stringify(session));
   }
 
   function authRedirectUrl() {
+    if (isNativeApp()) return 'com.hitit.ledger://auth/callback';
     const target = new URL(window.location.href);
     target.search = '';
     target.hash = '';
@@ -167,12 +177,11 @@
 
   async function beginGoogleLogin() {
     await saveConfig();
-    if (window.Capacitor?.isNativePlatform?.()) throw new Error('Google 登录目前支持 Chrome 中的 HITIT 网页版和已安装 PWA；本地 APK 尚未配置安全的系统浏览器回跳。');
     if (!crypto?.subtle) throw new Error('当前浏览器不支持安全登录，请更新浏览器后重试');
     const random = crypto.getRandomValues(new Uint8Array(48));
     const verifier = base64Url(random);
     const challenge = base64Url(new Uint8Array(await crypto.subtle.digest('SHA-256', encoder.encode(verifier))));
-    sessionStorage.setItem(OAUTH_VERIFIER_KEY, verifier);
+    authStorage().setItem(OAUTH_VERIFIER_KEY, verifier);
     const query = new URLSearchParams({
       provider: 'google',
       redirect_to: authRedirectUrl(),
@@ -184,27 +193,47 @@
     // instead of fetch(), which follows the cross-origin redirect and fails CORS.
     const authorizeUrl = new URL('/auth/v1/authorize', config.url);
     authorizeUrl.search = query.toString();
+    if (isNativeApp()) {
+      const browser = window.HITITNative?.Browser;
+      if (!browser) throw new Error('APK 登录组件尚未加载，请更新或重新安装应用');
+      await browser.open({ url: authorizeUrl.href });
+      return;
+    }
     window.location.assign(authorizeUrl.href);
   }
 
-  async function completeGoogleRedirect() {
-    const current = new URL(window.location.href);
+  async function completeGoogleRedirect(callbackUrl = window.location.href) {
+    const current = new URL(callbackUrl);
+    if (isNativeApp() && (current.protocol !== 'com.hitit.ledger:' || current.hostname !== 'auth' || current.pathname !== '/callback')) return false;
     const query = current.searchParams;
     const hash = new URLSearchParams(current.hash.replace(/^#/, ''));
     const code = query.get('code');
     const error = query.get('error_description') || query.get('error') || hash.get('error_description') || hash.get('error');
-    if (!code && !error) return false;
+    const accessToken = query.get('access_token') || hash.get('access_token');
+    const refreshToken = query.get('refresh_token') || hash.get('refresh_token');
+    if (!code && !error && !(accessToken && refreshToken)) return false;
 
-    current.search = '';
-    current.hash = '';
-    window.history.replaceState({}, document.title, current.href);
+    if (!isNativeApp() && callbackUrl === window.location.href) {
+      current.search = '';
+      current.hash = '';
+      window.history.replaceState({}, document.title, current.href);
+    }
     if (error) {
-      sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+      authStorage().removeItem(OAUTH_VERIFIER_KEY);
       show('Google 登录未完成：' + error, true);
       return false;
     }
 
-    const verifier = sessionStorage.getItem(OAUTH_VERIFIER_KEY);
+    if (accessToken && refreshToken) {
+      const user = await request('/auth/v1/user', { headers: { Authorization: 'Bearer ' + accessToken } });
+      if (!user?.id) throw new Error('无法确认登录账户，请重新登录');
+      putSession({ access_token: accessToken, refresh_token: refreshToken, expires_at: Number(hash.get('expires_at') || query.get('expires_at') || 0) || Math.floor(Date.now() / 1000) + Number(hash.get('expires_in') || query.get('expires_in') || 3600), user_id: user.id });
+      authStorage().removeItem(OAUTH_VERIFIER_KEY);
+      show('账户验证完成，已登录云端。输入加密口令并点“安全同步”即可同步账本。');
+      return true;
+    }
+
+    const verifier = authStorage().getItem(OAUTH_VERIFIER_KEY);
     if (!verifier) throw new Error('登录状态已过期，请重新使用 Google 登录');
     const tokens = await request('/auth/v1/token?grant_type=pkce', {
       method: 'POST',
@@ -220,9 +249,20 @@
       user_id: user.id
     });
     $('cloudPassword').value = '';
-    sessionStorage.removeItem(OAUTH_VERIFIER_KEY);
+    authStorage().removeItem(OAUTH_VERIFIER_KEY);
     show('Google 登录成功。输入加密口令并点“安全同步”，即可开启本次打开期间的自动同步。');
     return true;
+  }
+
+  async function handleNativeAuthCallback(url) {
+    if (!url || handledNativeCallbacks.has(url)) return;
+    handledNativeCallbacks.add(url);
+    try {
+      const completed = await completeGoogleRedirect(url);
+      if (completed) await window.HITITNative?.Browser?.close?.();
+    } catch (error) {
+      show(error.message || '登录回跳处理失败，请重新登录', true);
+    }
   }
 
   async function fetchRemote(session) {
@@ -368,6 +408,32 @@
 
     const localChanged = localHash !== base.hash;
     const remoteChanged = remoteHash !== base.hash;
+    const settingsAtRisk = ['income', 'expense', 'fixed'].filter(key =>
+      Array.isArray(local[key]) && local[key].length > 0 &&
+      (!Array.isArray(remoteState[key]) || remoteState[key].length === 0)
+    );
+    if (remoteChanged && settingsAtRisk.length) {
+      const groups = settingsAtRisk.map(key => key === 'income' ? '收入项目' : key === 'expense' ? '支出项目' : '固定收支').join('、');
+      if (automatic) {
+        autoSyncNeedsManual = true;
+        show('云端缺少本机的' + groups + '，自动同步已暂停以保护本机数据。请点“安全同步”并选择“采用本机”。', true);
+        return false;
+      }
+      const choice = await chooseConflict('云端项目列表不完整', '本机有' + groups + '，云端列表为空。请选择采用本机保留项目，或采用云端覆盖本机。');
+      if (choice === 'local') {
+        const saved = await putRemote(local, session, remote, password);
+        await window.HITITStorage.setMeta(baseKey, { revision: Number(saved.revision), hash: localHash });
+        show('已保留本机项目并同步到云端。');
+        return true;
+      }
+      if (choice === 'cloud') {
+        await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: remoteHash });
+        show('已采用云端账本。');
+        await app.replaceState(remoteState);
+        return true;
+      }
+      return false;
+    }
     if (localHash === remoteHash) {
       await window.HITITStorage.setMeta(baseKey, { revision: Number(remote.revision), hash: localHash });
       show('本机与云端数据一致，无需更新。');
@@ -508,7 +574,18 @@
       $('cloudPassword').value = '';
     }
     if (getSession()?.access_token) show('云端账户已登录。输入加密口令并点“安全同步”，即可开启本次打开期间的自动同步。');
-    try { await completeGoogleRedirect(); } catch (error) { show(error.message || 'Google 登录失败，请重试', true); }
+    if (isNativeApp()) {
+      const nativeApp = window.HITITNative?.App;
+      if (!nativeApp) {
+        show('APK 登录组件尚未加载，请更新或重新安装应用。', true);
+      } else {
+        await nativeApp.addListener('appUrlOpen', event => handleNativeAuthCallback(event?.url));
+        const launch = await nativeApp.getLaunchUrl();
+        if (launch?.url) await handleNativeAuthCallback(launch.url);
+      }
+    } else {
+      try { await completeGoogleRedirect(); } catch (error) { show(error.message || 'Google 登录失败，请重试', true); }
+    }
 
     $('cloudUrl').addEventListener('change', () => saveConfig().catch(() => {}));
     $('cloudAnonKey').addEventListener('change', () => saveConfig().catch(() => {}));
@@ -577,11 +654,12 @@
       if (session?.access_token) {
         try { await request('/auth/v1/logout', { method: 'POST', headers: { Authorization: 'Bearer ' + session.access_token } }); } catch {}
       }
-      sessionStorage.removeItem(SESSION_KEY);
+      authStorage().removeItem(SESSION_KEY);
       $('cloudPassword').value = '';
       $('vaultPassword').value = '';
       show('已退出云端账户。');
     });
   }).catch(() => {});
 })();
+
 
