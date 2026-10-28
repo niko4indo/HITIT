@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hitit-static-v36-transfer-grid';
+const CACHE_NAME = 'hitit-static-v37-swipe-pages';
 const baseUrl = new URL('./', self.registration.scope);
 const coreFiles = ['index.html', 'storage.js', 'backup.js', 'cloud-sync.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'].map(file => new URL(file, baseUrl).toString());
 self.addEventListener('install', event => {
