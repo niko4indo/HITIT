@@ -1,4 +1,4 @@
-const CACHE_NAME = 'hitit-static-v34-interaction-fix';
+const CACHE_NAME = 'hitit-static-v35-loan-transfer';
 const baseUrl = new URL('./', self.registration.scope);
 const coreFiles = ['index.html', 'storage.js', 'backup.js', 'cloud-sync.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'].map(file => new URL(file, baseUrl).toString());
 self.addEventListener('install', event => {
