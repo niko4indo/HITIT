@@ -80,6 +80,8 @@
     }
     const sessionActions = $('cloudSync')?.parentElement;
     if (sessionActions) sessionActions.hidden = !signedIn;
+    const loginOptions = $('cloudLoginOptions');
+    if (loginOptions) loginOptions.open = !signedIn;
     ['cloudSync', 'cloudHistory', 'cloudLogout'].forEach(id => {
       const button = $(id);
       if (button) button.hidden = !signedIn;
@@ -573,7 +575,7 @@
       authEmail.value = '';
       $('cloudPassword').value = '';
     }
-    if (getSession()?.access_token) show('云端账户已登录。输入加密口令并点“安全同步”，即可开启本次打开期间的自动同步。');
+    if (getSession()?.access_token) show('云端账户已登录。输入加密口令并点“安全同步”；完成后，本次打开期间的账本变更会自动加密上传。');
     if (isNativeApp()) {
       const nativeApp = window.HITITNative?.App;
       if (!nativeApp) {
@@ -621,7 +623,7 @@
           autoSyncPassword = password;
           autoSyncPaused = false;
           autoSyncNeedsManual = false;
-          show('同步完成；本次打开期间已开启自动同步。关闭页面后需重新输入加密口令。');
+          show('同步完成；本次打开期间已启用自动同步。重新打开应用后需再次输入加密口令并安全同步。');
         } else if (autoSyncPassword) {
           autoSyncNeedsManual = true;
         }
