@@ -199,6 +199,46 @@
     return put('meta:' + key, value);
   }
 
+  async function hasCleanupPassword() {
+    const record = await getMeta('localCleanupPassword');
+    return record?.format === 'HITIT-CLEANUP-PASSWORD-v1';
+  }
+
+  async function setCleanupPassword(password) {
+    if (!crypto?.subtle) throw new Error('当前环境不支持密码保护，请使用 HTTPS 或已安装应用');
+    if (typeof password !== 'string' || password.length < 6) throw new Error('清理密码至少需要 6 位');
+    const salt = crypto.getRandomValues(new Uint8Array(16));
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const key = await deriveLocalKey(password, salt);
+    const ciphertext = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, additionalData: encoder.encode('HITIT-CLEANUP-PASSWORD-v1') },
+      key,
+      encoder.encode('HITIT-CLEANUP-PASSWORD-CHECK')
+    );
+    await setMeta('localCleanupPassword', {
+      format: 'HITIT-CLEANUP-PASSWORD-v1',
+      salt: bytesToBase64(salt),
+      iv: bytesToBase64(iv),
+      ciphertext: bytesToBase64(new Uint8Array(ciphertext))
+    });
+  }
+
+  async function verifyCleanupPassword(password) {
+    const record = await getMeta('localCleanupPassword');
+    if (record?.format !== 'HITIT-CLEANUP-PASSWORD-v1' || typeof password !== 'string') return false;
+    try {
+      const key = await deriveLocalKey(password, base64ToBytes(record.salt));
+      const clear = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv: base64ToBytes(record.iv), additionalData: encoder.encode('HITIT-CLEANUP-PASSWORD-v1') },
+        key,
+        base64ToBytes(record.ciphertext)
+      );
+      return decoder.decode(clear) === 'HITIT-CLEANUP-PASSWORD-CHECK';
+    } catch {
+      return false;
+    }
+  }
+
   async function clearLocalData() {
     await writeQueue.catch(() => {});
     writeQueue = openDb().then(db => new Promise((resolve, reject) => {
@@ -209,7 +249,7 @@
         const cursor = cursorRequest.result;
         if (!cursor) return;
         // Keep the project connection so the user can sign back in and restore the cloud copy.
-        if (cursor.key !== 'meta:cloudConfig') cursor.delete();
+        if (cursor.key !== 'meta:cloudConfig' && cursor.key !== 'meta:localCleanupPassword') cursor.delete();
         cursor.continue();
       };
       cursorRequest.onerror = () => reject(cursorRequest.error || new Error('清理本机账本失败'));
@@ -283,6 +323,6 @@
     return writeQueue;
   }
 
-  window.HITITStorage = { loadState, saveState, getMeta, setMeta, clearLocalData, persistenceStatus, requestPersistentStorage, enableLocalEncryption, disableLocalEncryption, isLocallyEncrypted: () => localEncryption };
+  window.HITITStorage = { loadState, saveState, getMeta, setMeta, hasCleanupPassword, setCleanupPassword, verifyCleanupPassword, clearLocalData, persistenceStatus, requestPersistentStorage, enableLocalEncryption, disableLocalEncryption, isLocallyEncrypted: () => localEncryption };
 })();
 
