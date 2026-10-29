@@ -57,7 +57,13 @@
 
   async function decryptState(row, password) {
     const key = await deriveKey(password, fromBase64(row.salt));
-    const clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(row.iv), additionalData: encoder.encode('HITIT-CLOUD-v1') }, key, fromBase64(row.ciphertext));
+    let clear;
+    try {
+      clear = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: fromBase64(row.iv), additionalData: encoder.encode('HITIT-CLOUD-v1') }, key, fromBase64(row.ciphertext));
+    } catch (error) {
+      if (error?.name === 'OperationError') throw new Error('云端账本解密失败：请确认加密口令；若口令正确，云端密文可能已损坏。本机账本未更改。');
+      throw error;
+    }
     const data = JSON.parse(decoder.decode(clear));
     if (!validState(data)) throw new Error('云端账本格式不完整');
     return data;
@@ -70,13 +76,28 @@
   function show(message, error = false) {
     const element = $('cloudStatus');
     if (!element) return;
-    const signedIn = Boolean(getSession()?.access_token);
+    const session = getSession();
+    const signedIn = Boolean(session?.access_token);
+    const accountLabel = signedIn ? (session.user_email || session.email || (() => {
+      try {
+        const payloadPart = session.access_token.split('.')[1] || '';
+        const payload = JSON.parse(atob(payloadPart.replace(/-/g, '+').replace(/_/g, '/')));
+        return payload.email || payload.user_metadata?.email || '已登录';
+      } catch { return '已登录'; }
+    })()) : '未登录';
     element.textContent = message;
     element.dataset.state = error ? 'error' : signedIn ? 'success' : 'neutral';
     const badge = $('cloudAccountState');
     if (badge) {
-      badge.textContent = signedIn ? '已登录' : error ? '需处理' : '未登录';
+      badge.textContent = signedIn ? accountLabel : error ? '需处理' : '未登录';
+      badge.title = signedIn ? accountLabel : '';
       badge.dataset.state = signedIn ? 'active' : error ? 'error' : 'idle';
+    }
+    const groupStatus = $('cloudGroupStatus');
+    if (groupStatus) {
+      groupStatus.textContent = signedIn ? accountLabel : '未登录';
+      groupStatus.title = signedIn ? accountLabel : '未登录';
+      groupStatus.dataset.state = signedIn ? 'active' : 'idle';
     }
     const sessionActions = $('cloudSync')?.parentElement;
     if (sessionActions) sessionActions.hidden = !signedIn;
@@ -140,7 +161,7 @@
     if (!session?.access_token || !session?.refresh_token) throw new Error('请先登录云端账户');
     if (Number(session.expires_at) > Math.floor(Date.now() / 1000) + 45) return session;
     const refreshed = await request('/auth/v1/token?grant_type=refresh_token', { method: 'POST', body: JSON.stringify({ refresh_token: session.refresh_token }) });
-    session = { access_token: refreshed.access_token, refresh_token: refreshed.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(refreshed.expires_in || 3600), user_id: refreshed.user?.id || session.user_id };
+    session = { access_token: refreshed.access_token, refresh_token: refreshed.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(refreshed.expires_in || 3600), user_id: refreshed.user?.id || session.user_id, user_email: refreshed.user?.email || session.user_email || session.email };
     putSession(session);
     return session;
   }
@@ -158,7 +179,7 @@
       show('账户请求已提交。请查看收件箱；如该邮箱已有待验证账户，点“重发验证邮件”即可，无需重复创建。');
       return false;
     }
-    putSession({ access_token: result.access_token, refresh_token: result.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600), user_id: result.user?.id });
+    putSession({ access_token: result.access_token, refresh_token: result.refresh_token, expires_at: Math.floor(Date.now() / 1000) + Number(result.expires_in || 3600), user_id: result.user?.id, user_email: result.user?.email || email });
     $('cloudPassword').value = '';
     show('云端账户已登录；输入加密口令后可同步。');
     return true;
@@ -229,7 +250,7 @@
     if (accessToken && refreshToken) {
       const user = await request('/auth/v1/user', { headers: { Authorization: 'Bearer ' + accessToken } });
       if (!user?.id) throw new Error('无法确认登录账户，请重新登录');
-      putSession({ access_token: accessToken, refresh_token: refreshToken, expires_at: Number(hash.get('expires_at') || query.get('expires_at') || 0) || Math.floor(Date.now() / 1000) + Number(hash.get('expires_in') || query.get('expires_in') || 3600), user_id: user.id });
+      putSession({ access_token: accessToken, refresh_token: refreshToken, expires_at: Number(hash.get('expires_at') || query.get('expires_at') || 0) || Math.floor(Date.now() / 1000) + Number(hash.get('expires_in') || query.get('expires_in') || 3600), user_id: user.id, user_email: user.email });
       authStorage().removeItem(OAUTH_VERIFIER_KEY);
       show('账户验证完成，已登录云端。输入加密口令并点“安全同步”即可同步账本。');
       return true;
@@ -248,7 +269,8 @@
       access_token: tokens.access_token,
       refresh_token: tokens.refresh_token,
       expires_at: Math.floor(Date.now() / 1000) + Number(tokens.expires_in || 3600),
-      user_id: user.id
+      user_id: user.id,
+      user_email: user.email || tokens.user?.email
     });
     $('cloudPassword').value = '';
     authStorage().removeItem(OAUTH_VERIFIER_KEY);
@@ -530,7 +552,9 @@
   }
 
   function promptRestoreVersion(version, session) {
-    app.dialog('<h3>恢复历史版本 ' + Number(version.revision) + '</h3><p>将用此版本替换当前云端账本和本机账本。当前云端版本会先归档；两份数据不会自动合并。</p><input id="historyVaultPassword" type="password" autocomplete="new-password" placeholder="输入加密口令"><div class="actions"><button data-cancel>取消</button><button class="primary" data-ok>恢复</button></div>', async () => {
+    app.dialog('<h3>恢复历史版本 ' + Number(version.revision) + '</h3><p>将替换当前云端与本机账本；恢复前会归档现有云端版本。请先验证本机清理密码，再输入云端加密口令。</p><label class="cloud-field">本机清理密码<input id="historyCleanupPassword" type="password" autocomplete="new-password" placeholder="输入本机清理密码"></label><label class="cloud-field">云端加密口令<input id="historyVaultPassword" type="password" autocomplete="new-password" placeholder="输入云端加密口令"></label><div class="actions"><button data-cancel>取消</button><button class="primary" data-ok>恢复</button></div>', async () => {
+      if (!await window.HITITStorage.hasCleanupPassword()) return app.toast('请先在设置页设置本机清理密码，再恢复历史版本');
+      if (!await window.HITITStorage.verifyCleanupPassword($('historyCleanupPassword').value)) return app.toast('本机清理密码不正确，未恢复任何数据');
       const password = $('historyVaultPassword').value;
       if (password.length < 10) return app.toast('请输入正确的加密口令');
       const action = $('box').querySelector('[data-ok]');
@@ -628,7 +652,8 @@
           autoSyncNeedsManual = true;
         }
       } catch (error) {
-        show(error.message || '同步失败；本机数据未更改', true);
+        const detail = error?.message?.trim() || (error?.name === 'TypeError' ? '无法连接云端，请检查网络和 Supabase 连接设置' : '同步失败，请检查加密口令和云端状态');
+        show(detail + '；本机账本未更改', true);
       } finally {
         $('vaultPassword').value = '';
         syncInProgress = false;
